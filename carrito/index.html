@@ -917,34 +917,59 @@ if (typeof module !== 'undefined') {
 
   /**
    * Dentro del script, con google.script.run. Afuera, con fetch sin cookies: Google lo atiende como anónimo y no
-   * mira cuántas cuentas hay iniciadas en el navegador. Modificado 08/10/2026
+   * mira cuántas cuentas hay iniciadas en el navegador. Sin caché el script tarda unos segundos (lee la planilla) y,
+   * cuando Google tarda mucho, el redireccionamiento de la respuesta falla con 404 aunque el script haya terminado y
+   * guardado el catálogo: se avisa que puede tardar y se reintenta hasta dos veces (el reintento sale de la caché).
+   * Modificado 08/10/2026
    */
   function pedirCatalogo() {
     var falla = function () {
+      clearTimeout(avisoDemora);
       mostrarError('No se pudieron cargar los productos. Revisá la conexión y volvé a abrir el link.');
+    };
+    var avisoDemora = setTimeout(function () {
+      $('estado').textContent = 'Cargando productos… la primera vez puede tardar unos segundos.';
+    }, 4000);
+    var recibir = function (json) {
+      clearTimeout(avisoDemora);
+      recibirCatalogo(json);
     };
 
     if (window.google && google.script && google.script.run) {
       google.script.run
-        .withSuccessHandler(recibirCatalogo)
+        .withSuccessHandler(recibir)
         .withFailureHandler(falla)
         .obtenerCatalogo(datos.sheetId, datos.telefono, datos.lista, datos.firma);
       return;
     }
 
     if (!window.fetch) {
+      clearTimeout(avisoDemora);
       mostrarError('Este navegador es muy viejo para el carrito. Abrí el link con Chrome, Safari o Firefox.');
       return;
     }
 
-    window.fetch(CarritoLogica.urlCatalogo(datos), { credentials: 'omit' })
-      .then(function (respuesta) {
-        if (!respuesta.ok) {
-          throw new Error('HTTP ' + respuesta.status);
-        }
-        return respuesta.text();
-      })
-      .then(recibirCatalogo, falla);
+    var pedir = function () {
+      return window.fetch(CarritoLogica.urlCatalogo(datos), { credentials: 'omit' })
+        .then(function (respuesta) {
+          if (!respuesta.ok) {
+            throw new Error('HTTP ' + respuesta.status);
+          }
+          return respuesta.text();
+        })
+        .then(function (texto) {
+          JSON.parse(texto); // Una página de error de Google en lugar del JSON también se reintenta.
+          return texto;
+        });
+    };
+    var esperar = function (ms) {
+      return new Promise(function (listo) { setTimeout(listo, ms); });
+    };
+
+    pedir()
+      .catch(function () { return esperar(1500).then(pedir); })
+      .catch(function () { return esperar(3000).then(pedir); })
+      .then(recibir, falla);
   }
 
   function recibirCatalogo(json) {
