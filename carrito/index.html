@@ -949,8 +949,13 @@ if (typeof module !== 'undefined') {
       return;
     }
 
+    // Cada intento tiene un límite: a veces Google deja la respuesta colgada aunque el script ya haya terminado y
+    // guardado el catálogo; cortarla y reintentar lo trae de la caché.
     var pedir = function () {
-      return window.fetch(CarritoLogica.urlCatalogo(datos), { credentials: 'omit' })
+      var control = window.AbortController ? new window.AbortController() : null;
+      var limite = control ? setTimeout(function () { control.abort(); }, 20000) : null;
+
+      return window.fetch(CarritoLogica.urlCatalogo(datos), { credentials: 'omit', signal: control ? control.signal : undefined })
         .then(function (respuesta) {
           if (!respuesta.ok) {
             throw new Error('HTTP ' + respuesta.status);
@@ -958,8 +963,12 @@ if (typeof module !== 'undefined') {
           return respuesta.text();
         })
         .then(function (texto) {
+          clearTimeout(limite);
           JSON.parse(texto); // Una página de error de Google en lugar del JSON también se reintenta.
           return texto;
+        }, function (ex) {
+          clearTimeout(limite);
+          throw ex;
         });
     };
     var esperar = function (ms) {
