@@ -202,6 +202,44 @@
     overflow-wrap: anywhere;
   }
 
+  /* Foto del producto (fondo blanco también en modo oscuro: las fotos suelen venir con fondo blanco). Creado 26/10/2026 */
+  .foto {
+    height: 190px;
+    margin: -14px -14px 2px;
+    border-radius: var(--radio) var(--radio) 0 0;
+    border-bottom: 1px solid var(--borde);
+    background: #ffffff;
+    overflow: hidden;
+  }
+
+  .foto img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 8px;
+    object-fit: contain;
+    opacity: 0;
+    transition: opacity .25s ease;
+  }
+
+  .foto.lista img { opacity: 1; }
+
+  .foto.cargando {
+    background: linear-gradient(90deg, var(--superficie-2) 25%, var(--borde) 50%, var(--superficie-2) 75%);
+    background-size: 200% 100%;
+    animation: brillo 1.2s linear infinite;
+  }
+
+  @keyframes brillo {
+    from { background-position: 200% 0; }
+    to { background-position: -200% 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .foto.cargando { animation: none; }
+    .foto img { transition: none; }
+  }
+
   .presentaciones {
     display: flex;
     flex-wrap: wrap;
@@ -706,6 +744,16 @@ var CarritoLogica = (function () {
       + (datos.firma ? '&firma=' + encodeURIComponent(datos.firma) : '');
   }
 
+  /** URL con la que la página le pide al script las fotos de esos productos (doGet con accion=imagenes). Creado 26/10/2026 */
+  function urlImagenes(datos, ids) {
+    return datos.api + '?accion=imagenes'
+      + '&sheetId=' + encodeURIComponent(datos.sheetId)
+      + '&telefono=' + encodeURIComponent(datos.telefono)
+      + (datos.lista == null ? '' : '&lista=' + encodeURIComponent(datos.lista))
+      + (datos.firma ? '&firma=' + encodeURIComponent(datos.firma) : '')
+      + '&ids=' + ids.join(',');
+  }
+
   // ---------------------------------------------------------------------------------------------------
   // Búsqueda
   // ---------------------------------------------------------------------------------------------------
@@ -841,6 +889,7 @@ var CarritoLogica = (function () {
     urlWhatsApp: urlWhatsApp,
     leerLink: leerLink,
     urlCatalogo: urlCatalogo,
+    urlImagenes: urlImagenes,
     normalizar: normalizar,
     buscar: buscar,
     agregar: agregar,
@@ -867,6 +916,8 @@ if (typeof module !== 'undefined') {
   'use strict';
 
   var POR_PAGINA = 30;
+  var IMAGENES_POR_PEDIDO = 30; // igual que MAXIMO_IMAGENES_POR_PEDIDO de Codigo.gs
+  var PEDIDOS_DE_IMAGENES_A_LA_VEZ = 2;
   var datos = window.DATOS_PAGINA || CarritoLogica.leerLink(window.location.search, window.API_CARRITO);
   var claveGuardado = 'almamovil-carrito-' + (datos.sheetId || '') + '-' + (datos.lista == null ? 'fila' : datos.lista);
 
@@ -877,6 +928,16 @@ if (typeof module !== 'undefined') {
   var items = [];
   var temporizadorBusqueda = null;
   var temporizadorAviso = null;
+
+  // Fotos: se piden al servidor sólo las de las tarjetas que llegan a la pantalla, de a tandas.
+  var imagenes = {};          // ProductoId -> data URL ('' = sin foto)
+  var esperandoImagen = {};   // ProductoId -> [nodos .foto] que esperan esa foto
+  var colaImagenes = [];
+  var pedidosDeImagenes = 0;
+  var temporizadorImagenes = null;
+  var observadorFotos = 'IntersectionObserver' in window
+    ? new IntersectionObserver(fotosVisibles, { rootMargin: '400px 0px' })
+    : null;
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -1042,6 +1103,7 @@ if (typeof module !== 'undefined') {
     var texto = $('buscar').value;
     resultados = CarritoLogica.buscar(productos, texto);
     mostrados = 0;
+    if (observadorFotos) { observadorFotos.disconnect(); }
     $('productos').textContent = '';
 
     var resumen = $('resumenBusqueda');
@@ -1085,6 +1147,10 @@ if (typeof module !== 'undefined') {
   function tarjeta(producto) {
     var seleccion = producto.x;
     var card = elemento('article', 'producto');
+
+    if (producto.im) {
+      card.appendChild(foto(producto));
+    }
 
     card.appendChild(elemento('h2', null, producto.n));
 
@@ -1145,6 +1211,146 @@ if (typeof module !== 'undefined') {
     card._refrescar = refrescar;
     refrescar();
     return card;
+  }
+
+  // -------------------------------------------------------------------------------------------------
+  // Fotos (Creado 26/10/2026)
+  // -------------------------------------------------------------------------------------------------
+
+  /** Lugar de la foto en la tarjeta: con la foto si ya se trajo; si no, cargando hasta que se vea. */
+  function foto(producto) {
+    var nodo = elemento('div', 'foto');
+    var img = document.createElement('img');
+
+    img.alt = producto.n;
+    img.decoding = 'async';
+    img.addEventListener('load', function () { nodo.classList.add('lista'); });
+    img.addEventListener('error', function () { nodo.remove(); });
+    nodo.appendChild(img);
+    nodo._productoId = producto.i;
+
+    if (imagenes.hasOwnProperty(producto.i)) {
+      ponerFoto(nodo, imagenes[producto.i]);
+    } else {
+      nodo.classList.add('cargando');
+      if (observadorFotos) {
+        observadorFotos.observe(nodo);
+      } else {
+        encolarFoto(nodo);
+      }
+    }
+
+    return nodo;
+  }
+
+  function fotosVisibles(entradas) {
+    entradas.forEach(function (entrada) {
+      if (entrada.isIntersecting) {
+        observadorFotos.unobserve(entrada.target);
+        encolarFoto(entrada.target);
+      }
+    });
+  }
+
+  function encolarFoto(nodo) {
+    var id = nodo._productoId;
+
+    if (imagenes.hasOwnProperty(id)) {
+      ponerFoto(nodo, imagenes[id]);
+      return;
+    }
+
+    if (!esperandoImagen[id]) {
+      esperandoImagen[id] = [];
+      colaImagenes.push(id);
+    }
+    esperandoImagen[id].push(nodo);
+
+    // Se juntan las tarjetas que aparecen juntas (al cargar o al desplazarse) en un mismo pedido.
+    clearTimeout(temporizadorImagenes);
+    temporizadorImagenes = setTimeout(pedirImagenes, 120);
+  }
+
+  /** Dentro del script, con google.script.run; en GitHub Pages, con fetch sin cookies como el catálogo. */
+  function pedirImagenes() {
+    while (colaImagenes.length > 0 && pedidosDeImagenes < PEDIDOS_DE_IMAGENES_A_LA_VEZ) {
+      var ids = colaImagenes.splice(0, IMAGENES_POR_PEDIDO);
+      pedidosDeImagenes++;
+
+      if (window.google && google.script && google.script.run) {
+        google.script.run
+          .withSuccessHandler(recibirImagenes)
+          .withFailureHandler(sinImagenes)
+          .withUserObject(ids)
+          .obtenerImagenes(datos.sheetId, datos.telefono, datos.lista, datos.firma, ids);
+      } else {
+        pedirImagenesConFetch(ids);
+      }
+    }
+  }
+
+  /** Un reintento: la primera lectura de una tanda puede tardar y Google a veces corta la respuesta. */
+  function pedirImagenesConFetch(ids) {
+    var pedir = function () {
+      return window.fetch(CarritoLogica.urlImagenes(datos, ids), { credentials: 'omit' })
+        .then(function (respuesta) {
+          if (!respuesta.ok) {
+            throw new Error('HTTP ' + respuesta.status);
+          }
+          return respuesta.text();
+        })
+        .then(function (texto) {
+          JSON.parse(texto);
+          return texto;
+        });
+    };
+
+    pedir()
+      .catch(function () {
+        return new Promise(function (listo) { setTimeout(listo, 2000); }).then(pedir);
+      })
+      .then(function (texto) { recibirImagenes(texto, ids); }, function (ex) { sinImagenes(ex, ids); });
+  }
+
+  function recibirImagenes(json, ids) {
+    var respuesta;
+
+    try {
+      respuesta = JSON.parse(json);
+    } catch (ex) {
+      respuesta = {};
+    }
+
+    var recibidas = respuesta.imagenes || {};
+    terminarPedidoDeImagenes(ids, function (id) { return recibidas[id] || ''; });
+  }
+
+  /** Si el pedido falla, esos productos quedan sin foto (el carrito sigue andando igual). */
+  function sinImagenes(error, ids) {
+    terminarPedidoDeImagenes(ids, function () { return ''; });
+  }
+
+  function terminarPedidoDeImagenes(ids, datoDe) {
+    pedidosDeImagenes--;
+
+    ids.forEach(function (id) {
+      imagenes[id] = datoDe(id);
+      (esperandoImagen[id] || []).forEach(function (nodo) { ponerFoto(nodo, imagenes[id]); });
+      delete esperandoImagen[id];
+    });
+
+    pedirImagenes();
+  }
+
+  function ponerFoto(nodo, dato) {
+    nodo.classList.remove('cargando');
+
+    if (!dato) {
+      nodo.remove();
+      return;
+    }
+
+    nodo.firstChild.src = dato;
   }
 
   /** Botones − / + con un campo de cantidad (enteros de 1 a 9999). */
