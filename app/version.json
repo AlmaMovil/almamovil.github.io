@@ -1,0 +1,10 @@
+{
+  "versionCode": 410,
+  "versionName": "4.10",
+  "fecha": "2026-10-26",
+  "url": "https://github.com/AlmaMovil/almamovil.github.io/releases/download/v4.10/AlmaMovil-4.10.apk",
+  "novedades": [
+    "La observación que se carga en el carrito llega en los pedidos Api"
+  ],
+  "minimaVersionCode": 410
+}
